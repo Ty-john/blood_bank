@@ -107,7 +107,10 @@ st.markdown("""
 @st.cache_data
 def load_data():
     try:
-        df = pd.read_csv('blood_sample_size.csv')
+        import os
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        csv_path = os.path.join(base_dir, 'blood_sample_size.csv')
+        df = pd.read_csv(csv_path)
         df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
         df['months_active'] = df['months_since_first_donation'].replace(0, 1)
         df['monthly_rate'] = df['pints_donated'] / df['months_active']
@@ -570,11 +573,12 @@ with tab1:
     import json
     import os
 
-    map_file_path = 'states_min.geojson' 
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    map_file_path = os.path.join(base_dir, 'states_min.geojson') 
     aus_geo = None
 
     if os.path.exists(map_file_path):
-        with open(map_file_path, 'r') as f:
+        with open(map_file_path, 'r', encoding='utf-8') as f:
             aus_geo = json.load(f)
     else:
         st.error(f"⚠️ Map file missing! Please ensure '{map_file_path}' is in this folder.")
@@ -587,21 +591,39 @@ with tab1:
 
         custom_scale = [[0.0, inactive_color], [1.0, active_color]]
 
-        fig_map = px.choropleth_mapbox(
-            state_data,
-            geojson=aus_geo,
-            locations='state_name',
-            featureidkey="properties.STATE_NAME", 
-            color='active_flag',
-            color_continuous_scale=custom_scale,
-            range_color=[0, 1],
-            hover_name='state_name',
-            hover_data={'active_flag': False, 'pints_donated': True},
-            mapbox_style=map_style,
-            zoom=2.4,
-            center={"lat": -28, "lon": 133},
-            opacity=0.9
-        )
+        # Compatible with Plotly 6+ (MapLibre px.choropleth_map) and legacy Plotly (px.choropleth_mapbox)
+        if hasattr(px, "choropleth_map"):
+            fig_map = px.choropleth_map(
+                state_data,
+                geojson=aus_geo,
+                locations='state_name',
+                featureidkey="properties.STATE_NAME", 
+                color='active_flag',
+                color_continuous_scale=custom_scale,
+                range_color=[0, 1],
+                hover_name='state_name',
+                hover_data={'active_flag': False, 'pints_donated': True},
+                map_style=map_style,
+                zoom=2.4,
+                center={"lat": -28, "lon": 133},
+                opacity=0.9
+            )
+        else:
+            fig_map = px.choropleth_mapbox(
+                state_data,
+                geojson=aus_geo,
+                locations='state_name',
+                featureidkey="properties.STATE_NAME", 
+                color='active_flag',
+                color_continuous_scale=custom_scale,
+                range_color=[0, 1],
+                hover_name='state_name',
+                hover_data={'active_flag': False, 'pints_donated': True},
+                mapbox_style=map_style,
+                zoom=2.4,
+                center={"lat": -28, "lon": 133},
+                opacity=0.9
+            )
         
         fig_map.update_traces(
             marker_line_width=1,
@@ -611,11 +633,12 @@ with tab1:
         
         # Only add dots if selection is active
         if selected_states:
-            fig_map.add_trace(go.Scattermapbox(
+            ScatterTrace = getattr(go, "Scattermap", getattr(go, "Scattermapbox", None))
+            fig_map.add_trace(ScatterTrace(
                 lat=df_local['lat'],
                 lon=df_local['lon'],
                 mode='markers+text',
-                marker=go.scattermapbox.Marker(size=8, color=dot_color),
+                marker=dict(size=8, color=dot_color),
                 text=df_local['city'],
                 textfont=dict(size=12, color=dot_color, family="Arial Black"),
                 textposition="top center",
@@ -664,7 +687,8 @@ with tab1:
 
     else:
         st.warning("Showing basic map (GeoJSON file not found).")
-        fig_dots = px.scatter_mapbox(df_local, lat="lat", lon="lon", size="pints_donated", zoom=2.4)
+        scatter_map_fn = getattr(px, "scatter_map", getattr(px, "scatter_mapbox", None))
+        fig_dots = scatter_map_fn(df_local, lat="lat", lon="lon", size="pints_donated", zoom=2.4)
         st.plotly_chart(fig_dots, use_container_width=True)
 
   # 5. CLEAN & FRIENDLY SUPPLY VS DEMAND CHART
