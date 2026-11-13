@@ -155,6 +155,96 @@ def load_data():
         st.error("File 'blood_sample_size.csv' not found. Please upload it.")
         return pd.DataFrame()
 
+@st.cache_data
+def load_geojson():
+    import json
+    import os
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    map_file_path = os.path.join(base_dir, 'states_min.geojson')
+    if os.path.exists(map_file_path):
+        with open(map_file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return None
+
+@st.cache_data(show_spinner=False)
+def build_base_map(_aus_geo, state_base, dark_mode, map_style):
+    active_color = "#D32F2F" if dark_mode else "#FF4B4B"
+    inactive_color = "#7a7a7a" if dark_mode else "#E0E0E0"
+    dot_color = "#D30000" if not dark_mode else "white"
+
+    custom_scale = [[0.0, inactive_color], [1.0, active_color]]
+
+    # Compatible with Plotly 6+ (MapLibre px.choropleth_map) and legacy Plotly (px.choropleth_mapbox)
+    if hasattr(px, "choropleth_map"):
+        fig_map = px.choropleth_map(
+            state_base,
+            geojson=_aus_geo,
+            locations='state_name',
+            featureidkey="properties.STATE_NAME", 
+            color='active_flag',
+            color_continuous_scale=custom_scale,
+            range_color=[0, 1],
+            hover_name='state_name',
+            hover_data={'active_flag': False, 'pints_donated': True},
+            map_style=map_style,
+            zoom=2.4,
+            center={"lat": -28, "lon": 133},
+            opacity=0.9
+        )
+    else:
+        fig_map = px.choropleth_mapbox(
+            state_base,
+            geojson=_aus_geo,
+            locations='state_name',
+            featureidkey="properties.STATE_NAME", 
+            color='active_flag',
+            color_continuous_scale=custom_scale,
+            range_color=[0, 1],
+            hover_name='state_name',
+            hover_data={'active_flag': False, 'pints_donated': True},
+            mapbox_style=map_style,
+            zoom=2.4,
+            center={"lat": -28, "lon": 133},
+            opacity=0.9
+        )
+    
+    fig_map.update_traces(
+        marker_line_width=1,
+        marker_line_color="rgba(255,255,255,0.25)" if dark_mode else "rgba(0,0,0,0.2)",
+        showscale=False
+    )
+    
+    # Always keep 2 traces (Choropleth + Scatter) so trace structure remains constant
+    ScatterTrace = getattr(go, "Scattermap", getattr(go, "Scattermapbox", None))
+    fig_map.add_trace(ScatterTrace(
+        lat=[],
+        lon=[],
+        mode='markers+text',
+        marker=dict(size=8, color=dot_color),
+        text=[],
+        textfont=dict(size=12, color=dot_color, family="Arial Black"),
+        textposition="top center",
+        showlegend=False,
+        hoverinfo='none'
+    ))
+    
+    fig_map.update_layout(
+        uirevision="constant",
+        map_uirevision="constant",
+        height=520,
+        margin={"r":0,"t":0,"l":0,"b":0},
+        paper_bgcolor='rgba(0,0,0,0)',
+        coloraxis_showscale=False,
+        clickmode='event+select'
+    )
+    
+    fig_map.data[0].update(
+        selected=dict(marker=dict(opacity=0.9)),
+        unselected=dict(marker=dict(opacity=0.9)),
+    )
+    
+    return fig_map
+
 # --- IMPORTANT: THIS EXECUTES THE FUNCTION ---
 df = load_data()
 
@@ -558,7 +648,7 @@ with tab1:
     # Allows users to click on the map to toggle states in the filter.
 
     # --- A. PREPARE DATA ---
-    state_data = df[['state_name']].dropna().drop_duplicates().copy()
+    state_data = df[['state_name']].dropna().drop_duplicates().sort_values('state_name').reset_index(drop=True)
 
     # Logic: Check if filter is active
     if selected_states:
@@ -566,129 +656,43 @@ with tab1:
     else:
         state_data['active_flag'] = 0
 
-    pints_by_state = df_local.groupby('state_name')['pints_donated'].sum()
+    pints_by_state = df.groupby('state_name')['pints_donated'].sum()
     state_data['pints_donated'] = state_data['state_name'].map(pints_by_state).fillna(0)
 
     # --- B. LOAD GEOJSON ---
-    import json
-    import os
-
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    map_file_path = os.path.join(base_dir, 'states_min.geojson') 
-    aus_geo = None
-
-    if os.path.exists(map_file_path):
-        with open(map_file_path, 'r', encoding='utf-8') as f:
-            aus_geo = json.load(f)
-    else:
-        st.error(f"⚠️ Map file missing! Please ensure '{map_file_path}' is in this folder.")
+    aus_geo = load_geojson()
+    if not aus_geo:
+        st.error("⚠️ Map file missing! Please ensure 'states_min.geojson' is in this folder.")
 
     # --- C. GENERATE MAP ---
     if aus_geo:
-        active_color = "#D32F2F" if dark_mode else "#FF4B4B"
-        inactive_color = "#7a7a7a" if dark_mode else "#E0E0E0"
-        dot_color = "#D30000" if not dark_mode else "white"
+        fig_map = build_base_map(
+            aus_geo,
+            state_data.assign(active_flag=0),   # same rows, selection removed
+            dark_mode,
+            map_style,
+        )
+        # cheap per-click updates (trace 0 = states, trace 1 = dots)
+        fig_map.data[0].z = state_data['active_flag']
+        fig_map.data[1].update(
+             lat=df_local['lat'] if selected_states else [],
+             lon=df_local['lon'] if selected_states else [],
+             text=df_local['city'] if selected_states else [],
+        )
 
-        custom_scale = [[0.0, inactive_color], [1.0, active_color]]
-
-        # Compatible with Plotly 6+ (MapLibre px.choropleth_map) and legacy Plotly (px.choropleth_mapbox)
-        if hasattr(px, "choropleth_map"):
-            fig_map = px.choropleth_map(
-                state_data,
-                geojson=aus_geo,
-                locations='state_name',
-                featureidkey="properties.STATE_NAME", 
-                color='active_flag',
-                color_continuous_scale=custom_scale,
-                range_color=[0, 1],
-                hover_name='state_name',
-                hover_data={'active_flag': False, 'pints_donated': True},
-                map_style=map_style,
-                zoom=2.4,
-                center={"lat": -28, "lon": 133},
-                opacity=0.9
+        st.plotly_chart(
+                fig_map,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="points",
+                key="aus_map_interaction"
             )
-        else:
-            fig_map = px.choropleth_mapbox(
-                state_data,
-                geojson=aus_geo,
-                locations='state_name',
-                featureidkey="properties.STATE_NAME", 
-                color='active_flag',
-                color_continuous_scale=custom_scale,
-                range_color=[0, 1],
-                hover_name='state_name',
-                hover_data={'active_flag': False, 'pints_donated': True},
-                mapbox_style=map_style,
-                zoom=2.4,
-                center={"lat": -28, "lon": 133},
-                opacity=0.9
-            )
-        
-        fig_map.update_traces(
-            marker_line_width=1,
-            marker_line_color="rgba(255,255,255,0.25)" if dark_mode else "rgba(0,0,0,0.2)",
-            showscale=False
-        )
-        
-        # Only add dots if selection is active
-        if selected_states:
-            ScatterTrace = getattr(go, "Scattermap", getattr(go, "Scattermapbox", None))
-            fig_map.add_trace(ScatterTrace(
-                lat=df_local['lat'],
-                lon=df_local['lon'],
-                mode='markers+text',
-                marker=dict(size=8, color=dot_color),
-                text=df_local['city'],
-                textfont=dict(size=12, color=dot_color, family="Arial Black"),
-                textposition="top center",
-                showlegend=False,
-                hoverinfo='none'
-            ))
-        
-        fig_map.update_layout(
-            margin={"r":0,"t":0,"l":0,"b":0},
-            paper_bgcolor='rgba(0,0,0,0)',
-            coloraxis_showscale=False,
-            # IMPORTANT: Enable click selection mode
-            clickmode='event+select'
-        )
-        
-        # --- D. RENDER MAP WITH SELECTION EVENT ---
-        # on_select="rerun" makes the app reload when you click the map
-        map_event = st.plotly_chart(
-            fig_map, 
-            use_container_width=True, 
-            on_select="rerun",
-            key="aus_map_interaction" # Unique key to track state
-        )
-
-        # --- E. HANDLE CLICK EVENT ---
-        # If user clicked a state, we update the main filter
-        if map_event and "selection" in map_event and map_event["selection"]["points"]:
-            
-            # 1. Grab the clicked state name
-            clicked_point = map_event["selection"]["points"][0]
-            clicked_state = clicked_point.get("location") or clicked_point.get("hovertext")
-            
-            if clicked_state:
-                # 2. Get current filter list (handle safely)
-                current_pills = st.session_state.get("state_pills", [])
-                
-                # 3. Toggle Logic (If active -> remove. If inactive -> add)
-                if clicked_state in current_pills:
-                    current_pills.remove(clicked_state)
-                else:
-                    current_pills.append(clicked_state)
-                
-                # 4. Push update to Session State & Rerun
-                st.session_state["state_pills"] = current_pills
-                st.rerun()
 
     else:
         st.warning("Showing basic map (GeoJSON file not found).")
         scatter_map_fn = getattr(px, "scatter_map", getattr(px, "scatter_mapbox", None))
         fig_dots = scatter_map_fn(df_local, lat="lat", lon="lon", size="pints_donated", zoom=2.4)
+        fig_dots.update_layout(uirevision="constant", height=520)
         st.plotly_chart(fig_dots, use_container_width=True)
 
   # 5. CLEAN & FRIENDLY SUPPLY VS DEMAND CHART
